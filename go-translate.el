@@ -263,21 +263,18 @@ The `go-translate-token-current' with the format (time . tkk)."
   (let ((url-user-agent go-translate-user-agent)
         (url-request-extra-headers '(("Connection" . "Keep-Alive"))))
     (if syncp
-        (with-current-buffer
-            (url-retrieve-synchronously go-translate-base-url 'silent nil 3)
-          (prog1
-              (setq go-translate-token-current
-                    (cons (current-time)
-                          (go-translate-token--extract-tkk)))
-            (kill-buffer)))
-      (url-retrieve go-translate-base-url
-                    (lambda (status)
-                      (unless status
-                        (setq go-translate-token-current
-                              (cons (current-time)
-                                    (go-translate-token--extract-tkk))))
-                      (kill-buffer))
-                    nil 'silent))))
+        (go-translate-do-request
+         go-translate-base-url
+         (lambda ()
+           (setq go-translate-token-current
+                 (cons (current-time) (go-translate-token--extract-tkk)))))
+      (go-translate-do-request
+       go-translate-base-url
+       (lambda (status)
+         (unless status
+           (setq go-translate-token-current
+                 (cons (current-time)
+                       (go-translate-token--extract-tkk)))))))))
 
 (defun go-translate-token--extract-tkk ()
   "Get the Token-Key from the page buffer."
@@ -704,6 +701,35 @@ If BACKWARDP is t, then choose prev one."
            if (overlayp ov)
            do (delete-overlay ov)))
 
+(defun go-translate-log (msg)
+  (let ((buf (get-buffer-create "*gggg*")))
+    (with-current-buffer buf
+      (goto-char (point-max))
+      (insert msg)
+      (insert "\n\n"))))
+
+(defun go-translate-do-request (url callback asyncp)
+  (let ((url-user-agent go-translate-user-agent)
+        (url-request-extra-headers '(("Connection" . "Keep-Alive"))))
+    (if asyncp
+        (progn
+          (go-translate-log (format "[async] %s" url))
+          (url-retrieve url
+                        (lambda (status)
+                          (go-translate-log (format "[async] response state: %s" status))
+                          (funcall callback status)
+                          (kill-buffer)
+                          (go-translate-log (format "[async] %s ended." url)))))
+      (with-current-buffer
+          (progn
+            (go-translate-log (format "[sync] %s" url))
+            (url-retrieve-synchronously url 'silent nil 3))
+        (prog1
+            (funcall callback)
+          (go-translate-log (format "[sync] ened"))
+          (kill-buffer))))))
+
+
 ;; Functions
 
 (defvar go-translate-inputs-minibuffer-keymap
@@ -864,27 +890,26 @@ dividing the rendering into two parts will have a better experience."
 (defun go-translate-default-retrieve-async (req render-fun)
   "Request with url in REQ for the translation, then render with RENDER-FUN.
 This should be asynchronous."
-  (let ((buf (current-buffer))
-        (url-user-agent go-translate-user-agent)
-        (url-request-extra-headers '(("Connection" . "Keep-Alive"))))
-    (url-retrieve (car req)
-                  (lambda (status)
-                    (if (and status (eq (car status) :error))
-                        (with-current-buffer buf
-                          ;; if errors occur, pass an error string to the render function
-                          (funcall render-fun req (format "Request Error: %s" (cdr status))))
-                      (goto-char (point-min))
-                      (re-search-forward "\n\n")
-                      (let ((content (buffer-substring-no-properties (point) (point-max))))
-                        (with-current-buffer buf
-                          (funcall render-fun req
-                                   ;; catch the error and pass to render function
-                                   (condition-case err
-                                       (prog1
-                                           (go-translate-result--to-json content)
-                                         (message "Done."))
-                                     (error (format "Result Error: %s" err)))))))
-                    (kill-buffer)))))
+  (let ((buf (current-buffer)))
+    (go-translate-do-request
+     (car req)
+     (lambda (status)
+       (if (and status (eq (car status) :error))
+           (with-current-buffer buf
+             ;; if errors occur, pass an error string to the render function
+             (funcall render-fun req (format "Request Error: %s" (cdr status))))
+         (goto-char (point-min))
+         (re-search-forward "\n\n")
+         (let ((content (buffer-substring-no-properties (point) (point-max))))
+           (with-current-buffer buf
+             (funcall render-fun req
+                      ;; catch the error and pass to render function
+                      (condition-case err
+                          (prog1
+                              (go-translate-result--to-json content)
+                            (message "Done."))
+                        (error (format "Result Error: %s" err))))))))
+     t)))
 
 (defun go-translate-default-buffer-render (req resp)
   "Render the json RESP obtained through REQ to buffer.
